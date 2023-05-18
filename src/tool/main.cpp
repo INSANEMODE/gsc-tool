@@ -37,7 +37,7 @@ namespace xsk
 {
 
 enum class encd { _, source, assembly, binary };
-enum class mode { _, assemble, disassemble, compile, decompile, parse, rename };
+enum class mode { _, assemble, disassemble, compile, decompile, parse, rename, check };
 enum class game { _, iw5, iw6, iw7, iw8, iw9, s1, s2, s4, h1, h2, t6, t7, t8, t9 };
 enum class mach { _, pc, ps3, ps4, ps5, xb2, xb3, xb4, wiiu };
 
@@ -57,6 +57,7 @@ std::unordered_map<std::string_view, mode> const modes =
     { "decomp", mode::decompile },
     { "parse", mode::parse },
     { "rename", mode::rename },
+    { "check", mode::check },
 };
 
 std::unordered_map<std::string_view, game> const games =
@@ -113,6 +114,7 @@ std::map<mode, encd> const encds =
     { mode::disassemble, encd::binary },
     { mode::compile, encd::source },
     { mode::decompile, encd::binary },
+    { mode::check, encd::source },
 };
 
 auto overwrite_prompt(std::string const& file) -> bool
@@ -417,6 +419,56 @@ auto rename_file(game game, mach mach, fs::path file, fs::path rel) -> void
     }
 }
 
+auto check_file(game game, mach mach, fs::path file, fs::path rel) -> void
+{
+    try
+    {
+        if (file.extension() != ".gsc")
+            throw std::runtime_error("expected .gsc file");
+
+        rel = fs::path{ games_rev.at(game) } / rel / file.filename().replace_extension((zonetool ? ".cgsc" : ".gscbin"));
+
+        auto data = utils::file::read(file);
+        auto outasm = contexts[game][mach]->compiler().compile(file.string(), data);
+        auto outbin = contexts[game][mach]->assembler().assemble(*outasm);
+
+        if (true/*overwrite_prompt(file + (zonetool ? ".cgsc" : ".gscbin"))*/)
+        {
+            if (zonetool)
+            {
+                auto path = fs::path{ "compiled" } / rel;
+                //utils::file::save(path, outbin.first.data, outbin.first.size);
+                //utils::file::save(path.replace_extension(".cgsc.stack"), outbin.second.data, outbin.second.size);
+                //std::cout << fmt::format("compiled {}\n", rel.generic_string());
+            }
+            else
+            {
+                asset script;
+                script.name = "GSC"s;
+
+                script.bytecode.resize(outbin.first.size);
+                std::memcpy(script.bytecode.data(), outbin.first.data, script.bytecode.size());
+
+                script.buffer.resize(outbin.second.size);
+                std::memcpy(script.buffer.data(), outbin.second.data, script.buffer.size());
+                script.buffer = utils::zlib::compress(script.buffer);
+
+                script.len = static_cast<std::uint32_t>(outbin.second.size);
+                script.compressedLen = static_cast<std::uint32_t>(script.buffer.size());
+                script.bytecodeLen = static_cast<std::uint32_t>(script.bytecode.size());
+
+                auto result = script.serialize();
+                //utils::file::save(fs::path{ "compiled" } / rel, result);
+                //std::cout << fmt::format("compiled {}\n", rel.generic_string());
+            }
+        }
+    }
+    catch (std::exception const& e)
+    {
+        std::cerr << fmt::format("{} at {}\n", e.what(), file.generic_string());
+    }
+}
+
 std::unordered_map<std::string, std::vector<std::uint8_t>> files;
 
 auto fs_read(std::string const& name) -> std::pair<buffer, std::vector<u8>>
@@ -657,6 +709,7 @@ auto init(game game, mach mach) -> void
     funcs[mode::decompile] = decompile_file;
     funcs[mode::parse] = parse_file;
     funcs[mode::rename] = rename_file;
+    funcs[mode::check] = check_file;
 
     if (!contexts.contains(game))
     {
@@ -793,6 +846,31 @@ void rename_file(game, mach, fs::path const&, fs::path)
     std::cerr << fmt::format("not implemented for treyarch\n");
 }
 
+void check_file(game game, mach mach, fs::path const& file, fs::path rel)
+{
+    try
+    {
+        if (game != game::t6)
+            throw std::runtime_error("not implemented");
+
+        if (file.extension() != ".gsc" && file.extension() != ".csc")
+            throw std::runtime_error("expected .gsc or .csc file");
+
+        rel = fs::path{ games_rev.at(game) } / rel / file.filename();
+
+        auto data = utils::file::read(file);
+        auto outasm = contexts[game][mach]->compiler().compile(file.string(), data);
+        auto outbin = contexts[game][mach]->assembler().assemble(*outasm);
+
+        //utils::file::save(fs::path{ "compiled" } / rel, outbin.data, outbin.size);
+        //std::cout << fmt::format("compiled {}\n", rel.generic_string());
+    }
+    catch (std::exception const& e)
+    {
+        std::cerr << fmt::format("{} at {}\n", e.what(), file.generic_string());
+    }
+}
+
 auto fs_read(std::string const& name) -> std::vector<u8>
 {
     return utils::file::read(fs::path{ name });
@@ -895,7 +973,7 @@ auto init(game game, mach mach) -> void
     funcs[mode::compile] = compile_file;
     funcs[mode::decompile] = decompile_file;
     funcs[mode::parse] = parse_file;
-    funcs[mode::rename] = rename_file;
+    funcs[mode::check] = check_file;
 
     if (!contexts.contains(game))
     {
@@ -1010,7 +1088,7 @@ auto parse_flags(u32 argc, char** argv, mode& mode, game& game, mach& mach, fs::
 auto print_usage() -> void
 {
     std::cout << "usage: gsc-tool <mode> <game> <system> <path>\n";
-    std::cout << "\t* mode: asm, disasm, comp, decomp, parse, rename\n";
+    std::cout << "\t* mode: asm, disasm, comp, decomp, parse, rename, check\n";
     std::cout << "\t* game: iw5, iw6, iw7, iw8, iw9, s1, s2, s4, h1, h2, t6, t7, t8, t9\n";
     std::cout << "\t* system: pc, ps3, ps4, ps5, xb2 (360), xb3 (One), xb4 (Series X|S), wiiu\n";
     std::cout << "\t* path: file or directory (recursive)\n";
